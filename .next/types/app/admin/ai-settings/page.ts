@@ -1,4 +1,4 @@
-// File: C:\Users\User\.gemini\antigravity-ide\scratch\update-Replyxai\app\admin\ai-settings\page.tsx
+// File: /Users/naimulislam/Documents/ReplyX Pro /app/admin/ai-settings/page.tsx
 import * as entry from '../../../../../app/admin/ai-settings/page.js'
 import type { ResolvingMetadata, ResolvingViewport } from 'next/dist/lib/metadata/types/metadata-interface.js'
 

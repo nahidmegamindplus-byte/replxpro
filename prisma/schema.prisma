@@ -90,6 +90,7 @@ model Page {
   maxImagesPerConversation  Int           @default(2) // 0 for unlimited, or 1, 2, 3, etc.
   maxImagesPerReply         Int           @default(1) // 1, 2, 3, 5, etc. How many images to send in a single reply
   orderDetection            Boolean       @default(true)
+  autoHumanOnOrder          Boolean       @default(true) // Switch conversation to Human Mode when order is placed
   voiceProcessing           Boolean       @default(true)
   imageUnderstanding        Boolean       @default(true)
   followUpEnabled           Boolean       @default(false)

@@ -451,6 +451,7 @@ export default function PagesManagementPage() {
       maxImagesPerConversation: page.maxImagesPerConversation !== undefined ? page.maxImagesPerConversation : 2,
       maxImagesPerReply: page.maxImagesPerReply !== undefined ? page.maxImagesPerReply : 1,
       orderDetection: page.orderDetection ?? true,
+      autoHumanOnOrder: page.autoHumanOnOrder ?? true,
       voiceProcessing: page.voiceProcessing ?? true,
       imageUnderstanding: page.imageUnderstanding ?? true,
       followUpEnabled: page.followUpEnabled ?? false,
@@ -858,6 +859,11 @@ export default function PagesManagementPage() {
                         <ShoppingBag className="w-3 h-3" />
                         অর্ডার ক্যাপচার
                       </span>
+                      {page.autoHumanOnOrder !== false && (
+                        <span className="px-2 py-0.5 rounded-md flex items-center gap-1 font-medium bg-amber-50 text-amber-700 border border-amber-200 text-[11px]">
+                          অর্ডার পেলে অটো Human Mode
+                        </span>
+                      )}
                       <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 border border-slate-200 font-medium">
                         ভাষা: {page.replyLanguage}
                       </span>
@@ -1452,6 +1458,19 @@ export default function PagesManagementPage() {
                           checked={editForm.orderDetection}
                           onChange={(e) => setEditForm({ ...editForm, orderDetection: e.target.checked })}
                           className="w-4 h-4 rounded text-indigo-600 focus:ring-indigo-500 border-slate-300"
+                        />
+                      </label>
+
+                      <label className="flex items-center justify-between p-3 rounded-xl bg-amber-50/60 border border-amber-200/80 cursor-pointer hover:bg-amber-50 transition-colors">
+                        <div>
+                          <div className="text-xs font-bold text-slate-800">অর্ডার দিলে অটো Human Mode</div>
+                          <div className="text-[10px] text-slate-500">গ্রাহক অর্ডার কনফার্ম করলে AI স্থগিত হয়ে স্বয়ংক্রিয়ভাবে Human Mode-এ যাবে</div>
+                        </div>
+                        <input
+                          type="checkbox"
+                          checked={editForm.autoHumanOnOrder ?? true}
+                          onChange={(e) => setEditForm({ ...editForm, autoHumanOnOrder: e.target.checked })}
+                          className="w-4 h-4 rounded text-amber-600 focus:ring-amber-500 border-slate-300"
                         />
                       </label>
 

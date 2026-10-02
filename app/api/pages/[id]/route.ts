@@ -119,6 +119,7 @@ export async function PUT(
       updateData.maxImagesPerReply = isNaN(perReply) ? 1 : Math.max(1, Math.min(10, perReply));
     }
     if (body.orderDetection !== undefined) updateData.orderDetection = Boolean(body.orderDetection);
+    if (body.autoHumanOnOrder !== undefined) updateData.autoHumanOnOrder = Boolean(body.autoHumanOnOrder);
     if (body.voiceProcessing !== undefined) updateData.voiceProcessing = Boolean(body.voiceProcessing);
     if (body.imageUnderstanding !== undefined) updateData.imageUnderstanding = Boolean(body.imageUnderstanding);
 

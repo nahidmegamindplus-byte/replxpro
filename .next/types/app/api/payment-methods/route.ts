@@ -1,4 +1,4 @@
-// File: C:\Users\User\.gemini\antigravity-ide\scratch\update-Replyxai\app\api\payment-methods\route.ts
+// File: /Users/naimulislam/Documents/ReplyX Pro /app/api/payment-methods/route.ts
 import * as entry from '../../../../../app/api/payment-methods/route.js'
 import type { NextRequest } from 'next/server.js'
 

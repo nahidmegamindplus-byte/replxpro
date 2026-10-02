@@ -33,27 +33,46 @@ import {
   Check,
   Eye,
   MessageSquareReply,
+  AlertCircle,
+  Database,
 } from 'lucide-react';
 import { useToast } from '@/components/ui/Toast';
 import { apiFetch } from '@/lib/api-client';
 
+// LocalStorage cache keys
+const CACHE_CONVERSATIONS_KEY = 'replyx_cached_conversations_v2';
+const CACHE_MESSAGES_PREFIX = 'replyx_conv_msgs_v2_';
+const CACHE_DRAFT_PREFIX = 'replyx_conv_draft_v2_';
+const CACHE_LAST_SELECTED_KEY = 'replyx_last_conv_id_v2';
+
 export default function ConversationsPage() {
   const toast = useToast();
   const chatContainerRef = useRef<HTMLDivElement | null>(null);
+  const convListContainerRef = useRef<HTMLDivElement | null>(null);
+  const activeFetchAbortController = useRef<AbortController | null>(null);
 
+  // Core State
   const [conversations, setConversations] = useState<any[]>([]);
   const [selectedConv, setSelectedConv] = useState<any>(null);
   const [messages, setMessages] = useState<any[]>([]);
+
+  // Loading & Pagination States
   const [loadingList, setLoadingList] = useState(true);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [totalCount, setTotalCount] = useState(0);
+  const [listError, setListError] = useState<string | null>(null);
 
   // Mobile responsive view toggle (false = show list, true = show chat thread)
   const [mobileShowChat, setMobileShowChat] = useState(false);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
 
-  // Filters
+  // Filters & Search
   const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('ALL');
   const [channelFilter, setChannelFilter] = useState('ALL');
 
@@ -77,7 +96,51 @@ export default function ConversationsPage() {
     notes: '',
   });
 
-  // Isolated Container Scroll to Bottom helper (No Window Jump)
+  // Debounce search input (300ms) to prevent server choking
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearch(search);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [search]);
+
+  // Initial Local Storage Hydration (Instant Zero-Latency Render)
+  useEffect(() => {
+    try {
+      if (typeof window !== 'undefined') {
+        const cachedConvsRaw = localStorage.getItem(CACHE_CONVERSATIONS_KEY);
+        if (cachedConvsRaw) {
+          const cachedConvs = JSON.parse(cachedConvsRaw);
+          if (Array.isArray(cachedConvs) && cachedConvs.length > 0) {
+            setConversations(cachedConvs);
+            setLoadingList(false);
+
+            // Attempt to restore last active conversation
+            const lastSelectedId = localStorage.getItem(CACHE_LAST_SELECTED_KEY);
+            const targetConv =
+              cachedConvs.find((c: any) => c.id === lastSelectedId) || cachedConvs[0];
+
+            if (targetConv) {
+              setSelectedConv(targetConv);
+              const cachedMsgsRaw = localStorage.getItem(
+                `${CACHE_MESSAGES_PREFIX}${targetConv.id}`
+              );
+              if (cachedMsgsRaw) {
+                try {
+                  const cachedMsgs = JSON.parse(cachedMsgsRaw);
+                  if (Array.isArray(cachedMsgs)) {
+                    setMessages(cachedMsgs);
+                  }
+                } catch (_) {}
+              }
+            }
+          }
+        }
+      }
+    } catch (_) {}
+  }, []);
+
+  // Isolated Container Scroll to Bottom helper
   const scrollToBottom = useCallback((smooth = false) => {
     if (chatContainerRef.current) {
       chatContainerRef.current.scrollTo({
@@ -94,42 +157,152 @@ export default function ConversationsPage() {
     setShowScrollBottom(distanceFromBottom > 150);
   };
 
-  const fetchConversations = async (keepSelection = true) => {
+  // Fetch Conversations (Paginated with Cache Fallback)
+  const fetchConversations = async (pageNum = 1, append = false, isBackground = false) => {
     try {
-      if (!keepSelection) setLoadingList(true);
+      setListError(null);
+      if (!append && !isBackground && conversations.length === 0) {
+        setLoadingList(true);
+      }
+      if (append) {
+        setLoadingMore(true);
+      }
+
       const params = new URLSearchParams();
-      if (search) params.append('search', search);
+      if (debouncedSearch) params.append('search', debouncedSearch);
       if (statusFilter !== 'ALL') params.append('status', statusFilter);
       if (channelFilter !== 'ALL') params.append('channel', channelFilter);
+      params.append('page', String(pageNum));
+      params.append('limit', '30');
 
-      const data = await apiFetch<any>(`/api/conversations?${params.toString()}`, { retries: 2 });
+      const data = await apiFetch<any>(`/api/conversations?${params.toString()}`, {
+        retries: 2,
+      });
 
       if (data?.success && Array.isArray(data.conversations)) {
-        setConversations(data.conversations);
-        if (data.conversations.length > 0 && !selectedConv) {
-          loadConversation(data.conversations[0].id, false);
+        setTotalPages(data.totalPages || 1);
+        setTotalCount(data.total || 0);
+        setPage(pageNum);
+
+        if (append) {
+          setConversations((prev) => {
+            const existingIds = new Set(prev.map((c) => c.id));
+            const newUnique = data.conversations.filter((c: any) => !existingIds.has(c.id));
+            const updated = [...prev, ...newUnique];
+            // Cache to LocalStorage
+            try {
+              if (typeof window !== 'undefined') {
+                localStorage.setItem(CACHE_CONVERSATIONS_KEY, JSON.stringify(updated.slice(0, 100)));
+              }
+            } catch (_) {}
+            return updated;
+          });
+        } else {
+          setConversations(data.conversations);
+          // Cache to LocalStorage
+          try {
+            if (typeof window !== 'undefined') {
+              localStorage.setItem(
+                CACHE_CONVERSATIONS_KEY,
+                JSON.stringify(data.conversations.slice(0, 100))
+              );
+            }
+          } catch (_) {}
+
+          // Auto-select first conversation if none selected
+          if (data.conversations.length > 0 && !selectedConv) {
+            loadConversation(data.conversations[0].id, false);
+          }
+        }
+      } else {
+        if (!append && conversations.length === 0) {
+          setListError(data?.error || 'কথোপকথন তালিকা লোড করা যায়নি।');
         }
       }
-    } catch (_) {
-      // Safe fallback handled silently by apiFetch
+    } catch (err: any) {
+      if (!append && conversations.length === 0) {
+        setListError('নেটওয়ার্কের কারণে লোড করতে সমস্যা হয়েছে। পুনরায় চেষ্টা করুন।');
+      }
     } finally {
       setLoadingList(false);
+      setLoadingMore(false);
       setIsRefreshing(false);
     }
   };
 
+  // Trigger conversation list fetch when filters/search change
+  useEffect(() => {
+    fetchConversations(1, false);
+  }, [debouncedSearch, statusFilter, channelFilter]);
+
+  // Load Single Conversation Thread (with AbortController + LocalStorage Cache)
   const loadConversation = async (id: string, openMobileChat = true) => {
+    if (!id) return;
+
+    // Save draft of current conversation before switching
+    if (selectedConv?.id && replyText) {
+      try {
+        localStorage.setItem(`${CACHE_DRAFT_PREFIX}${selectedConv.id}`, replyText);
+      } catch (_) {}
+    }
+
+    // Cancel any in-flight requests to prevent race condition
+    if (activeFetchAbortController.current) {
+      activeFetchAbortController.current.abort();
+    }
+    const abortCtrl = new AbortController();
+    activeFetchAbortController.current = abortCtrl;
+
+    if (openMobileChat) {
+      setMobileShowChat(true);
+    }
+
+    // Load any draft for the new conversation
+    try {
+      const savedDraft = localStorage.getItem(`${CACHE_DRAFT_PREFIX}${id}`) || '';
+      setReplyText(savedDraft);
+    } catch (_) {
+      setReplyText('');
+    }
+
+    // Check LocalStorage cache first for instant message rendering
+    try {
+      const cachedMsgsRaw = localStorage.getItem(`${CACHE_MESSAGES_PREFIX}${id}`);
+      if (cachedMsgsRaw) {
+        const cached = JSON.parse(cachedMsgsRaw);
+        if (Array.isArray(cached) && cached.length > 0) {
+          setMessages(cached);
+          setTimeout(() => scrollToBottom(false), 30);
+        }
+      }
+    } catch (_) {}
+
+    // Track active ID
+    try {
+      localStorage.setItem(CACHE_LAST_SELECTED_KEY, id);
+    } catch (_) {}
+
     try {
       setLoadingMessages(true);
-      if (openMobileChat) {
-        setMobileShowChat(true);
-      }
-
-      const data = await apiFetch<any>(`/api/conversations/${id}`, { retries: 2 });
+      const res = await fetch(`/api/conversations/${id}`, {
+        signal: abortCtrl.signal,
+      });
+      const data = await res.json();
 
       if (data?.success && data.conversation) {
         setSelectedConv(data.conversation);
         setMessages(data.messages || []);
+
+        // Persist messages to LocalStorage
+        try {
+          if (typeof window !== 'undefined') {
+            localStorage.setItem(
+              `${CACHE_MESSAGES_PREFIX}${id}`,
+              JSON.stringify(data.messages || [])
+            );
+          }
+        } catch (_) {}
+
         // Setup order form defaults
         setOrderForm({
           customerName: data.conversation.customerName || '',
@@ -141,21 +314,19 @@ export default function ConversationsPage() {
           notes: '',
         });
 
-        // Instant scroll to bottom without page jump
+        // Instant scroll to bottom
         setTimeout(() => {
           scrollToBottom(false);
-        }, 60);
+        }, 50);
       }
-    } catch (e) {
-      toast.error('মেসেজ লোড করতে সমস্যা হয়েছে।');
+    } catch (e: any) {
+      if (e?.name !== 'AbortError') {
+        toast.error('মেসেজ লোড করতে সমস্যা হয়েছে।');
+      }
     } finally {
       setLoadingMessages(false);
     }
   };
-
-  useEffect(() => {
-    fetchConversations();
-  }, [search, statusFilter, channelFilter]);
 
   // Periodic follow-up automation runner (runs safely every 2 minutes while on dashboard)
   useEffect(() => {
@@ -170,6 +341,22 @@ export default function ConversationsPage() {
     return () => clearInterval(interval);
   }, []);
 
+  // Save reply text draft to LocalStorage as user types
+  const handleReplyTextChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setReplyText(val);
+    if (selectedConv?.id) {
+      try {
+        if (val) {
+          localStorage.setItem(`${CACHE_DRAFT_PREFIX}${selectedConv.id}`, val);
+        } else {
+          localStorage.removeItem(`${CACHE_DRAFT_PREFIX}${selectedConv.id}`);
+        }
+      } catch (_) {}
+    }
+  };
+
+  // Send Manual Human Reply
   const handleSendManualReply = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedConv || !replyText.trim()) return;
@@ -186,18 +373,37 @@ export default function ConversationsPage() {
       const data = await res.json();
       if (data.success) {
         setReplyText('');
-        setMessages((prev) => [...prev, data.savedMessage]);
-        // Update current conversation last message preview
-        setConversations((prev) =>
-          prev.map((c) =>
+        // Clear draft in LocalStorage
+        try {
+          localStorage.removeItem(`${CACHE_DRAFT_PREFIX}${selectedConv.id}`);
+        } catch (_) {}
+
+        const updatedMessages = [...messages, data.savedMessage];
+        setMessages(updatedMessages);
+
+        // Update cache
+        try {
+          localStorage.setItem(
+            `${CACHE_MESSAGES_PREFIX}${selectedConv.id}`,
+            JSON.stringify(updatedMessages)
+          );
+        } catch (_) {}
+
+        // Update current conversation last message preview in list
+        setConversations((prev) => {
+          const updated = prev.map((c) =>
             c.id === selectedConv.id
               ? { ...c, lastMessage: sentText, lastMessageAt: new Date().toISOString() }
               : c
-          )
-        );
+          );
+          try {
+            localStorage.setItem(CACHE_CONVERSATIONS_KEY, JSON.stringify(updated.slice(0, 100)));
+          } catch (_) {}
+          return updated;
+        });
+
         toast.success('মেসেজ সফলভাবে পাঠানো হয়েছে!');
 
-        // Smooth scroll to newly added message
         setTimeout(() => {
           scrollToBottom(true);
         }, 80);
@@ -211,6 +417,7 @@ export default function ConversationsPage() {
     }
   };
 
+  // Toggle AI active / pause
   const handleToggleAi = async () => {
     if (!selectedConv) return;
     const nextState = !selectedConv.aiEnabled;
@@ -225,9 +432,15 @@ export default function ConversationsPage() {
       const data = await res.json();
       if (data.success) {
         setSelectedConv(data.conversation);
-        setConversations((prev) =>
-          prev.map((c) => (c.id === data.conversation.id ? data.conversation : c))
-        );
+        setConversations((prev) => {
+          const updated = prev.map((c) =>
+            c.id === data.conversation.id ? data.conversation : c
+          );
+          try {
+            localStorage.setItem(CACHE_CONVERSATIONS_KEY, JSON.stringify(updated.slice(0, 100)));
+          } catch (_) {}
+          return updated;
+        });
         toast.success(data.message);
       }
     } catch (e) {
@@ -235,6 +448,7 @@ export default function ConversationsPage() {
     }
   };
 
+  // Edit customer name
   const handleUpdateCustomerName = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedConv || !tempCustomerName.trim()) return;
@@ -249,12 +463,17 @@ export default function ConversationsPage() {
 
       const data = await res.json();
       if (data.success) {
-        setSelectedConv((prev: any) => ({ ...prev, customerName: tempCustomerName.trim() }));
-        setConversations((prev) =>
-          prev.map((c) =>
+        const updatedConv = { ...selectedConv, customerName: tempCustomerName.trim() };
+        setSelectedConv(updatedConv);
+        setConversations((prev) => {
+          const updated = prev.map((c) =>
             c.id === selectedConv.id ? { ...c, customerName: tempCustomerName.trim() } : c
-          )
-        );
+          );
+          try {
+            localStorage.setItem(CACHE_CONVERSATIONS_KEY, JSON.stringify(updated.slice(0, 100)));
+          } catch (_) {}
+          return updated;
+        });
         setEditingName(false);
         toast.success('গ্রাহকের নাম সফলভাবে আপডেট করা হয়েছে!');
       } else {
@@ -267,6 +486,7 @@ export default function ConversationsPage() {
     }
   };
 
+  // Create Order from Conversation
   const handleCreateOrder = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedConv) return;
@@ -284,7 +504,8 @@ export default function ConversationsPage() {
           product: orderForm.product,
           quantity: orderForm.quantity,
           price: orderForm.price,
-          totalPrice: parseFloat(orderForm.price || '0') * parseInt(orderForm.quantity || '1', 10),
+          totalPrice:
+            parseFloat(orderForm.price || '0') * parseInt(orderForm.quantity || '1', 10),
           notes: orderForm.notes,
           status: 'PENDING',
           source: 'MANUAL',
@@ -295,17 +516,58 @@ export default function ConversationsPage() {
       if (data.success) {
         toast.success('অর্ডার সফলভাবে তৈরি হয়েছে!');
         setShowOrderModal(false);
-        setOrderForm({ customerName: '', phone: '', address: '', product: '', quantity: '1', price: '', notes: '' });
+        setOrderForm({
+          customerName: '',
+          phone: '',
+          address: '',
+          product: '',
+          quantity: '1',
+          price: '',
+          notes: '',
+        });
+
+        // Automatically reflect Human Mode switch if autoHumanOnOrder was applied
+        setSelectedConv((prev: any) => ({
+          ...prev,
+          status: 'HUMAN_MODE',
+          aiEnabled: false,
+          orders: [data.order, ...(prev?.orders || [])],
+        }));
+
+        setConversations((prev) => {
+          const updated = prev.map((c) =>
+            c.id === selectedConv.id ? { ...c, status: 'HUMAN_MODE', aiEnabled: false } : c
+          );
+          try {
+            localStorage.setItem(CACHE_CONVERSATIONS_KEY, JSON.stringify(updated.slice(0, 100)));
+          } catch (_) {}
+          return updated;
+        });
+      } else {
+        toast.error(data.error || 'অর্ডার তৈরি করতে ব্যর্থ হয়েছে।');
       }
     } catch (e) {
       toast.error('অর্ডার তৈরি করতে সমস্যা হয়েছে।');
     }
   };
 
+  // Infinite Scroll Handler for Conversation List
+  const handleConvListScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const { scrollTop, scrollHeight, clientHeight } = e.currentTarget;
+    if (
+      scrollHeight - scrollTop - clientHeight < 80 &&
+      !loadingMore &&
+      !loadingList &&
+      page < totalPages
+    ) {
+      fetchConversations(page + 1, true);
+    }
+  };
+
   return (
     <DashboardLayout
       title="ইনবক্স ও লাইভ কনভারসেশন"
-      subtitle="কাস্টমারের সাথে সরাসরি চ্যাট করুন, ভয়েস মেসেজ ও AI উত্তর নিয়ন্ত্রণ করুন"
+      subtitle="কাস্টমারের সাথে সরাসরি চ্যাট করুন, পূর্বের কথা মনে রেখে AI উত্তর নিয়ন্ত্রণ ও অর্ডার পরিচালনা করুন"
     >
       <div className="bg-white border border-slate-200/90 rounded-3xl shadow-sm overflow-hidden grid grid-cols-1 lg:grid-cols-12 h-[calc(100vh-140px)] min-h-[620px] max-h-[920px]">
         {/* ========================================================================= */}
@@ -332,7 +594,7 @@ export default function ConversationsPage() {
               <button
                 onClick={() => {
                   setIsRefreshing(true);
-                  fetchConversations(true);
+                  fetchConversations(1, false, false);
                 }}
                 title="রিফ্রেশ ইনবক্স"
                 className={`p-2 rounded-xl border border-slate-200 text-slate-500 hover:text-slate-900 bg-slate-50 hover:bg-slate-100 transition-colors ${
@@ -343,37 +605,39 @@ export default function ConversationsPage() {
               </button>
             </div>
 
-            <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-xs no-scrollbar">
-              <button
-                onClick={() => setStatusFilter('ALL')}
-                className={`px-3 py-1 rounded-lg transition-colors font-medium whitespace-nowrap ${
-                  statusFilter === 'ALL'
-                    ? 'bg-indigo-50 text-indigo-700 border border-indigo-200 shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
-                }`}
-              >
-                সকল চ্যাট
-              </button>
-              <button
-                onClick={() => setStatusFilter('ACTIVE')}
-                className={`px-3 py-1 rounded-lg transition-colors font-medium whitespace-nowrap ${
-                  statusFilter === 'ACTIVE'
-                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200 shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
-                }`}
-              >
-                AI সক্রিয়
-              </button>
-              <button
-                onClick={() => setStatusFilter('HUMAN_MODE')}
-                className={`px-3 py-1 rounded-lg transition-colors font-medium whitespace-nowrap ${
-                  statusFilter === 'HUMAN_MODE'
-                    ? 'bg-amber-50 text-amber-700 border border-amber-200 shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
-                }`}
-              >
-                হিউম্যান মোড
-              </button>
+            <div className="flex items-center justify-between gap-1">
+              <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-xs no-scrollbar">
+                <button
+                  onClick={() => setStatusFilter('ALL')}
+                  className={`px-3 py-1 rounded-lg transition-colors font-medium whitespace-nowrap ${
+                    statusFilter === 'ALL'
+                      ? 'bg-indigo-50 text-indigo-700 border border-indigo-200 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                  }`}
+                >
+                  সকল ({totalCount || conversations.length})
+                </button>
+                <button
+                  onClick={() => setStatusFilter('ACTIVE')}
+                  className={`px-3 py-1 rounded-lg transition-colors font-medium whitespace-nowrap ${
+                    statusFilter === 'ACTIVE'
+                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-200 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                  }`}
+                >
+                  AI সক্রিয়
+                </button>
+                <button
+                  onClick={() => setStatusFilter('HUMAN_MODE')}
+                  className={`px-3 py-1 rounded-lg transition-colors font-medium whitespace-nowrap ${
+                    statusFilter === 'HUMAN_MODE'
+                      ? 'bg-amber-50 text-amber-700 border border-amber-200 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                  }`}
+                >
+                  হিউম্যান মোড
+                </button>
+              </div>
             </div>
 
             {/* Social Channel Filter Pills */}
@@ -401,95 +665,144 @@ export default function ConversationsPage() {
             </div>
           </div>
 
-          {/* Conversations List with Isolated Smooth Scrolling */}
-          <div className="flex-1 min-h-0 chat-scroll-container divide-y divide-slate-100">
-            {loadingList ? (
+          {/* Conversations List with High-Performance Infinite Scroll */}
+          <div
+            ref={convListContainerRef}
+            onScroll={handleConvListScroll}
+            className="flex-1 min-h-0 chat-scroll-container divide-y divide-slate-100 overflow-y-auto"
+          >
+            {loadingList && conversations.length === 0 ? (
               <div className="py-16 text-center space-y-2">
                 <div className="w-6 h-6 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin mx-auto"></div>
-                <div className="text-xs text-slate-500">ইনবক্স লোড হচ্ছে...</div>
+                <div className="text-xs text-slate-500 font-medium">ইনবক্স লোড হচ্ছে...</div>
+              </div>
+            ) : listError && conversations.length === 0 ? (
+              <div className="py-16 text-center text-xs text-slate-500 px-4 space-y-3">
+                <AlertCircle className="w-8 h-8 text-amber-500 mx-auto" />
+                <p className="font-semibold text-slate-700">{listError}</p>
+                <button
+                  onClick={() => fetchConversations(1, false)}
+                  className="px-4 py-1.5 rounded-lg bg-indigo-600 text-white font-medium hover:bg-indigo-700 transition-colors shadow-xs"
+                >
+                  পুনরায় চেষ্টা করুন
+                </button>
               </div>
             ) : conversations.length === 0 ? (
               <div className="py-16 text-center text-xs text-slate-500 px-4 space-y-1">
                 <MessageSquare className="w-8 h-8 text-slate-400 mx-auto mb-2 opacity-60" />
-                <p className="font-semibold text-slate-700">কোনো কথোপকথন নেই</p>
-                <p className="text-[11px] text-slate-400">আপনার পেজে মেসেজ আসলে এখানে তালিকাভুক্ত হবে</p>
+                <p className="font-semibold text-slate-700">কোনো কথোপকথন পাওয়া যায়নি</p>
+                <p className="text-[11px] text-slate-400">
+                  আপনার সোশ্যাল পেজে মেসেজ আসলে এখানে প্রদর্শিত হবে
+                </p>
               </div>
             ) : (
-              conversations.map((c) => {
-                const isSelected = selectedConv?.id === c.id;
-                const isVoiceMessage =
-                  c.lastMessage?.includes('🎙️') ||
-                  c.lastMessage?.toLowerCase().includes('voice') ||
-                  c.lastMessage?.toLowerCase().includes('ভয়েস');
+              <>
+                {conversations.map((c) => {
+                  const isSelected = selectedConv?.id === c.id;
+                  const isVoiceMessage =
+                    c.lastMessage?.includes('🎙️') ||
+                    c.lastMessage?.toLowerCase().includes('voice') ||
+                    c.lastMessage?.toLowerCase().includes('ভয়েস');
 
-                return (
-                  <button
-                    key={c.id}
-                    onClick={() => loadConversation(c.id, true)}
-                    className={`w-full p-3.5 text-left flex items-start gap-3 transition-colors ${
-                      isSelected
-                        ? 'bg-indigo-50/70 border-l-3 border-indigo-600'
-                        : 'hover:bg-white/80 bg-transparent'
-                    }`}
-                  >
-                    <div className="w-10 h-10 rounded-full bg-indigo-100 border border-indigo-200 text-indigo-700 flex items-center justify-center font-bold text-xs shrink-0 mt-0.5">
-                      {c.customerName?.charAt(0) || 'C'}
-                    </div>
-
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center justify-between gap-1 mb-1">
-                        <h4 className="text-xs font-bold text-slate-900 truncate">
-                          {c.customerName || `Customer (${c.senderPsid?.slice(-4) || '...' })`}
-                        </h4>
-                        <span className="text-[10px] text-slate-400 shrink-0">
-                          {c.lastMessageAt
-                            ? new Date(c.lastMessageAt).toLocaleTimeString([], {
-                                hour: '2-digit',
-                                minute: '2-digit',
-                              })
-                            : ''}
-                        </span>
+                  return (
+                    <button
+                      key={c.id}
+                      onClick={() => loadConversation(c.id, true)}
+                      className={`w-full p-3.5 text-left flex items-start gap-3 transition-colors ${
+                        isSelected
+                          ? 'bg-indigo-50/70 border-l-3 border-indigo-600'
+                          : 'hover:bg-white/80 bg-transparent'
+                      }`}
+                    >
+                      <div className="w-10 h-10 rounded-full bg-indigo-100 border border-indigo-200 text-indigo-700 flex items-center justify-center font-bold text-xs shrink-0 mt-0.5">
+                        {c.customerName?.charAt(0) || 'C'}
                       </div>
 
-                      <p
-                        className={`text-xs truncate mb-1.5 ${
-                          isVoiceMessage ? 'text-indigo-600 font-medium' : 'text-slate-500'
-                        }`}
-                      >
-                        {c.lastMessage || 'নতুন বার্তা'}
-                      </p>
-
-                      <div className="flex items-center justify-between text-[10px]">
-                        <div className="flex items-center gap-1.5 truncate max-w-[140px]">
-                          <span className={`text-[9px] font-bold px-1.5 py-0.2 rounded ${
-                            (c.channel || c.page?.channel) === 'WHATSAPP'
-                              ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                              : (c.channel || c.page?.channel) === 'INSTAGRAM'
-                              ? 'bg-pink-50 text-pink-700 border border-pink-200'
-                              : (c.channel || c.page?.channel) === 'X'
-                              ? 'bg-slate-100 text-slate-800 border border-slate-200'
-                              : (c.channel || c.page?.channel) === 'TELEGRAM'
-                              ? 'bg-sky-50 text-sky-700 border border-sky-200'
-                              : 'bg-blue-50 text-blue-700 border border-blue-200'
-                          }`}>
-                            {c.channel || c.page?.channel || 'FB'}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between gap-1 mb-1">
+                          <h4 className="text-xs font-bold text-slate-900 truncate">
+                            {c.customerName ||
+                              `Customer (${c.senderPsid?.slice(-4) || '...' })`}
+                          </h4>
+                          <span className="text-[10px] text-slate-400 shrink-0">
+                            {c.lastMessageAt
+                              ? new Date(c.lastMessageAt).toLocaleTimeString([], {
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                })
+                              : ''}
                           </span>
-                          <span className="text-slate-500 truncate">{c.page?.pageName || 'Channel'}</span>
                         </div>
-                        {c.aiEnabled ? (
-                          <span className="text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200 flex items-center gap-1 font-semibold shrink-0">
-                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> AI Active
-                          </span>
-                        ) : (
-                          <span className="text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200 flex items-center gap-1 font-semibold shrink-0">
-                            <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span> Human Mode
-                          </span>
-                        )}
+
+                        <p
+                          className={`text-xs truncate mb-1.5 ${
+                            isVoiceMessage ? 'text-indigo-600 font-medium' : 'text-slate-500'
+                          }`}
+                        >
+                          {c.lastMessage || 'নতুন বার্তা'}
+                        </p>
+
+                        <div className="flex items-center justify-between text-[10px]">
+                          <div className="flex items-center gap-1.5 truncate max-w-[140px]">
+                            <span
+                              className={`text-[9px] font-bold px-1.5 py-0.2 rounded ${
+                                (c.channel || c.page?.channel) === 'WHATSAPP'
+                                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                  : (c.channel || c.page?.channel) === 'INSTAGRAM'
+                                  ? 'bg-pink-50 text-pink-700 border border-pink-200'
+                                  : (c.channel || c.page?.channel) === 'X'
+                                  ? 'bg-slate-100 text-slate-800 border border-slate-200'
+                                  : (c.channel || c.page?.channel) === 'TELEGRAM'
+                                  ? 'bg-sky-50 text-sky-700 border border-sky-200'
+                                  : 'bg-blue-50 text-blue-700 border border-blue-200'
+                              }`}
+                            >
+                              {c.channel || c.page?.channel || 'FB'}
+                            </span>
+                            <span className="text-slate-500 truncate">
+                              {c.page?.pageName || 'Channel'}
+                            </span>
+                          </div>
+                          {c.aiEnabled && c.status !== 'HUMAN_MODE' ? (
+                            <span className="text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200 flex items-center gap-1 font-semibold shrink-0">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>{' '}
+                              AI Active
+                            </span>
+                          ) : (
+                            <span className="text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200 flex items-center gap-1 font-semibold shrink-0">
+                              <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>{' '}
+                              Human Mode
+                            </span>
+                          )}
+                        </div>
                       </div>
-                    </div>
-                  </button>
-                );
-              })
+                    </button>
+                  );
+                })}
+
+                {/* Load More Button or Spinner */}
+                {page < totalPages && (
+                  <div className="p-3 text-center bg-slate-50 border-t border-slate-100">
+                    <button
+                      onClick={() => fetchConversations(page + 1, true)}
+                      disabled={loadingMore}
+                      className="w-full py-2 px-3 rounded-xl bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 text-xs font-semibold transition-colors flex items-center justify-center gap-2 shadow-xs disabled:opacity-60"
+                    >
+                      {loadingMore ? (
+                        <>
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin text-indigo-600" />
+                          <span>লোড হচ্ছে...</span>
+                        </>
+                      ) : (
+                        <>
+                          <ChevronDown className="w-3.5 h-3.5" />
+                          <span>আরো কথোপকথন লোড করুন ({conversations.length}/{totalCount})</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                )}
+              </>
             )}
           </div>
         </div>
@@ -522,7 +835,10 @@ export default function ConversationsPage() {
                   <div>
                     <div className="flex items-center gap-2">
                       {editingName ? (
-                        <form onSubmit={handleUpdateCustomerName} className="flex items-center gap-1.5">
+                        <form
+                          onSubmit={handleUpdateCustomerName}
+                          className="flex items-center gap-1.5"
+                        >
                           <input
                             type="text"
                             required
@@ -551,7 +867,8 @@ export default function ConversationsPage() {
                       ) : (
                         <div className="flex items-center gap-1.5 group">
                           <h3 className="text-sm font-bold text-slate-900 leading-tight">
-                            {selectedConv.customerName || `Customer (${selectedConv.senderPsid})`}
+                            {selectedConv.customerName ||
+                              `Customer (${selectedConv.senderPsid})`}
                           </h3>
                           <button
                             onClick={() => {
@@ -566,24 +883,40 @@ export default function ConversationsPage() {
                         </div>
                       )}
 
-                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${
-                        (selectedConv.channel || selectedConv.page?.channel) === 'WHATSAPP'
-                          ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                          : (selectedConv.channel || selectedConv.page?.channel) === 'INSTAGRAM'
-                          ? 'bg-pink-50 text-pink-700 border border-pink-200'
-                          : (selectedConv.channel || selectedConv.page?.channel) === 'X'
-                          ? 'bg-slate-100 text-slate-800 border border-slate-200'
-                          : (selectedConv.channel || selectedConv.page?.channel) === 'TELEGRAM'
-                          ? 'bg-sky-50 text-sky-700 border border-sky-200'
-                          : 'bg-blue-50 text-blue-700 border border-blue-200'
-                      }`}>
-                        {selectedConv.channel || selectedConv.page?.channel || 'FACEBOOK'}
+                      <span
+                        className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${
+                          (selectedConv.channel || selectedConv.page?.channel) === 'WHATSAPP'
+                            ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                            : (selectedConv.channel || selectedConv.page?.channel) ===
+                              'INSTAGRAM'
+                            ? 'bg-pink-50 text-pink-700 border border-pink-200'
+                            : (selectedConv.channel || selectedConv.page?.channel) === 'X'
+                            ? 'bg-slate-100 text-slate-800 border border-slate-200'
+                            : (selectedConv.channel || selectedConv.page?.channel) ===
+                              'TELEGRAM'
+                            ? 'bg-sky-50 text-sky-700 border border-sky-200'
+                            : 'bg-blue-50 text-blue-700 border border-blue-200'
+                        }`}
+                      >
+                        {selectedConv.channel ||
+                          selectedConv.page?.channel ||
+                          'FACEBOOK'}
                       </span>
                     </div>
                     <div className="flex items-center gap-2 text-[11px] text-slate-500">
-                      <span>আইডি: <span className="font-mono text-slate-700 font-medium">{selectedConv.senderPsid}</span></span>
+                      <span>
+                        আইডি:{' '}
+                        <span className="font-mono text-slate-700 font-medium">
+                          {selectedConv.senderPsid}
+                        </span>
+                      </span>
                       <span>•</span>
-                      <span>চ্যানেল: <span className="text-slate-800 font-medium">{selectedConv.page?.pageName}</span></span>
+                      <span>
+                        চ্যানেল:{' '}
+                        <span className="text-slate-800 font-medium">
+                          {selectedConv.page?.pageName}
+                        </span>
+                      </span>
                     </div>
                   </div>
                 </div>
@@ -613,12 +946,12 @@ export default function ConversationsPage() {
                   <button
                     onClick={handleToggleAi}
                     className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-colors border shadow-xs ${
-                      selectedConv.aiEnabled
+                      selectedConv.aiEnabled && selectedConv.status !== 'HUMAN_MODE'
                         ? 'bg-amber-50 hover:bg-amber-100 text-amber-800 border-amber-200'
                         : 'bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border-indigo-200'
                     }`}
                   >
-                    {selectedConv.aiEnabled ? (
+                    {selectedConv.aiEnabled && selectedConv.status !== 'HUMAN_MODE' ? (
                       <>
                         <Pause className="w-3.5 h-3.5" />
                         <span>AI পজ</span>
@@ -668,28 +1001,42 @@ export default function ConversationsPage() {
                         {selectedConv.customerName || 'অজ্ঞাত'}
                       </div>
                       <div className="text-[10px] text-slate-400 mt-0.5">
-                        আইডি: <span className="font-mono text-slate-600">{selectedConv.senderPsid}</span>
+                        আইডি:{' '}
+                        <span className="font-mono text-slate-600">
+                          {selectedConv.senderPsid}
+                        </span>
                       </div>
                     </div>
 
                     {/* Channel & Status */}
                     <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/80">
-                      <div className="text-[10px] text-slate-400 font-semibold mb-1">কানেকশন ও প্ল্যাটফর্ম</div>
+                      <div className="text-[10px] text-slate-400 font-semibold mb-1">
+                        কানেকশন ও প্ল্যাটফর্ম
+                      </div>
                       <div className="font-bold text-slate-900 text-xs flex items-center gap-1.5">
-                        <span>{selectedConv.channel || selectedConv.page?.channel || 'FACEBOOK'}</span>
+                        <span>
+                          {selectedConv.channel ||
+                            selectedConv.page?.channel ||
+                            'FACEBOOK'}
+                        </span>
                         <span className="text-[10px] px-1.5 py-0.2 rounded bg-indigo-50 text-indigo-700 border border-indigo-200 font-medium">
                           {selectedConv.page?.pageName}
                         </span>
                       </div>
                       <div className="text-[10px] text-slate-500 mt-1 flex items-center gap-1">
                         <Clock className="w-3 h-3 text-slate-400" />
-                        <span>প্রথম যোগাযোগ: {new Date(selectedConv.createdAt).toLocaleDateString()}</span>
+                        <span>
+                          প্রথম যোগাযোগ:{' '}
+                          {new Date(selectedConv.createdAt).toLocaleDateString()}
+                        </span>
                       </div>
                     </div>
 
                     {/* Orders Summary */}
                     <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/80">
-                      <div className="text-[10px] text-slate-400 font-semibold mb-1">অর্ডার হিস্ট্রি ও সামারি</div>
+                      <div className="text-[10px] text-slate-400 font-semibold mb-1">
+                        অর্ডার হিস্ট্রি ও সামারি
+                      </div>
                       <div className="font-bold text-slate-900 text-xs flex items-center gap-1.5">
                         <span>{selectedConv.orders?.length || 0} টি অর্ডার তৈরি</span>
                         {(selectedConv.orders?.length || 0) > 0 && (
@@ -699,7 +1046,13 @@ export default function ConversationsPage() {
                         )}
                       </div>
                       <div className="text-[10px] text-slate-500 mt-1 truncate">
-                        সর্বশেষ মেসেজ: {selectedConv.lastMessageAt ? new Date(selectedConv.lastMessageAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'N/A'}
+                        সর্বশেষ মেসেজ:{' '}
+                        {selectedConv.lastMessageAt
+                          ? new Date(selectedConv.lastMessageAt).toLocaleTimeString([], {
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })
+                          : 'N/A'}
                       </div>
                     </div>
                   </div>
@@ -711,7 +1064,14 @@ export default function ConversationsPage() {
                       {selectedConv.lastSeenAt ? (
                         <span className="inline-flex items-center gap-1 font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200">
                           <Eye className="w-3 h-3 text-emerald-600" />
-                          <span>সিন করেছেন ({new Date(selectedConv.lastSeenAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})</span>
+                          <span>
+                            সিন করেছেন (
+                            {new Date(selectedConv.lastSeenAt).toLocaleTimeString([], {
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })}
+                            )
+                          </span>
                         </span>
                       ) : (
                         <span className="inline-flex items-center gap-1 text-slate-500 bg-slate-100 px-2 py-0.5 rounded-md">
@@ -724,7 +1084,13 @@ export default function ConversationsPage() {
                       {selectedConv.lastFollowUpSentAt ? (
                         <span className="text-amber-700 font-medium bg-amber-50 px-2 py-0.5 rounded-md border border-amber-200 flex items-center gap-1">
                           <MessageSquareReply className="w-3 h-3 text-amber-600" />
-                          <span>অটো ফলো-আপ পাঠানো হয়েছে: {new Date(selectedConv.lastFollowUpSentAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                          <span>
+                            অটো ফলো-আপ পাঠানো হয়েছে:{' '}
+                            {new Date(selectedConv.lastFollowUpSentAt).toLocaleTimeString([], {
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })}
+                          </span>
                         </span>
                       ) : (
                         <span className="text-slate-400">
@@ -736,13 +1102,13 @@ export default function ConversationsPage() {
                 </div>
               )}
 
-              {/* Message List - Isolated Scroll Container with Momentum Scrolling */}
+              {/* Message List - Isolated Scroll Container with Instant Cache-First Loading */}
               <div
                 ref={chatContainerRef}
                 onScroll={handleChatScroll}
-                className="flex-1 min-h-0 chat-scroll-instant p-4 sm:p-6 space-y-4 relative bg-[#f8fafc]"
+                className="flex-1 min-h-0 chat-scroll-instant p-4 sm:p-6 space-y-4 relative bg-[#f8fafc] overflow-y-auto"
               >
-                {loadingMessages ? (
+                {loadingMessages && messages.length === 0 ? (
                   <div className="py-24 text-center space-y-2">
                     <div className="w-7 h-7 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin mx-auto"></div>
                     <div className="text-xs text-slate-500 font-medium">মেসেজ লোড হচ্ছে...</div>
@@ -797,7 +1163,9 @@ export default function ConversationsPage() {
                           </div>
 
                           {/* Text content */}
-                          {m.messageText && <p className="whitespace-pre-wrap">{m.messageText}</p>}
+                          {m.messageText && (
+                            <p className="whitespace-pre-wrap">{m.messageText}</p>
+                          )}
 
                           {/* Image Attachment if present */}
                           {m.mediaUrl && m.messageType === 'IMAGE' && (
@@ -842,7 +1210,7 @@ export default function ConversationsPage() {
                           {m.transcription && (
                             <div className="mt-2 bg-indigo-50/70 border border-indigo-100 p-2.5 rounded-xl text-[11px] space-y-1">
                               <div className="flex items-center gap-1 text-[10px] text-indigo-700 font-semibold">
-                                <Mic className="w-3 h-3 text-indigo-600" />
+                                <Mic className="w-3.5 h-3.5 text-indigo-600" />
                                 <span>ভয়েস রূপান্তর (Transcription):</span>
                               </div>
                               <p className="text-slate-800 italic font-medium leading-relaxed">
@@ -874,7 +1242,7 @@ export default function ConversationsPage() {
                 onSubmit={handleSendManualReply}
                 className="p-4 bg-white border-t border-slate-200/90 shrink-0"
               >
-                {!selectedConv.aiEnabled && (
+                {(!selectedConv.aiEnabled || selectedConv.status === 'HUMAN_MODE') && (
                   <div className="mb-2 px-3 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-[11px] flex items-center gap-1.5 font-medium">
                     <User className="w-3 h-3 text-amber-600" />
                     <span>হিউম্যান মোড সক্রিয় আছে। AI এখন কোনো অটোমেটিক রিপ্লাই দেবে না।</span>
@@ -886,12 +1254,18 @@ export default function ConversationsPage() {
                     <input
                       type="text"
                       value={replyText}
-                      onChange={(e) => setReplyText(e.target.value)}
-                      placeholder={`ম্যানুয়াল উত্তর লিখুন এবং সরাসরি ${selectedConv.channel || selectedConv.page?.channel || 'সোশ্যাল মিডিয়া'}-তে পাঠান...`}
+                      onChange={handleReplyTextChange}
+                      placeholder={`ম্যানুয়াল উত্তর লিখুন এবং সরাসরি ${
+                        selectedConv.channel ||
+                        selectedConv.page?.channel ||
+                        'সোশ্যাল মিডিয়া'
+                      }-তে পাঠান...`}
                       className="w-full pl-4 pr-16 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-slate-900 placeholder-slate-400 text-xs focus:outline-none focus:border-indigo-600 focus:ring-2 focus:ring-indigo-500/20 transition-all font-normal"
                     />
                     <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-bold text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-200/60 uppercase">
-                      {selectedConv.channel || selectedConv.page?.channel || 'LIVE'}
+                      {selectedConv.channel ||
+                        selectedConv.page?.channel ||
+                        'LIVE'}
                     </span>
                   </div>
                   <button
@@ -918,7 +1292,9 @@ export default function ConversationsPage() {
             <div className="flex-1 flex flex-col items-center justify-center text-center p-8 text-slate-400">
               <MessageSquare className="w-12 h-12 text-slate-300 mb-3" />
               <h4 className="text-sm font-semibold text-slate-700">কোনো কথোপকথন নির্বাচন করা হয়নি</h4>
-              <p className="text-xs text-slate-400 mt-1">বাম পাশের তালিকা থেকে একটি কাস্টমার চ্যাট সিলেক্ট করুন</p>
+              <p className="text-xs text-slate-400 mt-1">
+                বাম পাশের তালিকা থেকে একটি কাস্টমার চ্যাট সিলেক্ট করুন
+              </p>
             </div>
           )}
         </div>
@@ -945,7 +1321,9 @@ export default function ConversationsPage() {
                   type="text"
                   required
                   value={orderForm.customerName}
-                  onChange={(e) => setOrderForm({ ...orderForm, customerName: e.target.value })}
+                  onChange={(e) =>
+                    setOrderForm({ ...orderForm, customerName: e.target.value })
+                  }
                   className="w-full px-3.5 py-2 bg-white border border-slate-200 rounded-xl text-slate-900 text-xs focus:outline-none focus:border-indigo-600 focus:ring-2 focus:ring-indigo-500/20 transition-all"
                 />
               </div>
@@ -992,7 +1370,9 @@ export default function ConversationsPage() {
                   <input
                     type="number"
                     value={orderForm.quantity}
-                    onChange={(e) => setOrderForm({ ...orderForm, quantity: e.target.value })}
+                    onChange={(e) =>
+                      setOrderForm({ ...orderForm, quantity: e.target.value })
+                    }
                     className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-slate-900 text-xs focus:outline-none focus:border-indigo-600 focus:ring-2 focus:ring-indigo-500/20 transition-all"
                   />
                 </div>

@@ -304,11 +304,11 @@ export async function POST(req: NextRequest) {
           sendMessengerAction(senderPsid, 'typing_on', pageAccessToken).catch(() => {});
         }
 
-        // Fetch recent conversation history
+        // Fetch recent conversation history (retaining long-term memory of previous conversation)
         const recentMessages = await prisma.message.findMany({
           where: { conversationId: conversation.id },
           orderBy: { createdAt: 'desc' },
-          take: 8,
+          take: 25,
           select: { direction: true, messageText: true },
         });
 
@@ -477,11 +477,23 @@ export async function POST(req: NextRequest) {
               },
             });
 
+            // Automatic switch to Human Mode on order if page option is enabled (default: true)
+            const shouldAutoHuman = (page as any).autoHumanOnOrder !== undefined ? Boolean((page as any).autoHumanOnOrder) : true;
+            if (shouldAutoHuman) {
+              await prisma.conversation.update({
+                where: { id: conversation.id },
+                data: {
+                  status: 'HUMAN_MODE',
+                  aiEnabled: false,
+                },
+              });
+            }
+
             await logActivity({
               userId: page.userId,
               pageId: page.id,
               action: 'ORDER_CAPTURED_BY_AI',
-              description: `AI স্বয়ংক্রিয়ভাবে নতুন অর্ডার ক্যাপচার করেছে: #${newOrder.id.slice(0, 8)} (${detected.customerName} - ${detected.phone})`,
+              description: `AI স্বয়ংক্রিয়ভাবে নতুন অর্ডার ক্যাপচার করেছে: #${newOrder.id.slice(0, 8)} (${detected.customerName} - ${detected.phone})${shouldAutoHuman ? ' এবং কনভারসেশন অটো Human Mode-এ নেওয়া হয়েছে' : ''}`,
             });
           }
         } catch (aiErr: any) {

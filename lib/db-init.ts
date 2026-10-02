@@ -183,6 +183,7 @@ export async function ensureDatabaseReady() {
         "productImageReply" BOOLEAN NOT NULL DEFAULT 1,
         "maxImagesPerConversation" INTEGER NOT NULL DEFAULT 2,
         "orderDetection" BOOLEAN NOT NULL DEFAULT 1,
+        "autoHumanOnOrder" BOOLEAN NOT NULL DEFAULT 1,
         "voiceProcessing" BOOLEAN NOT NULL DEFAULT 1,
         "imageUnderstanding" BOOLEAN NOT NULL DEFAULT 1,
         "replyDelaySeconds" INTEGER NOT NULL DEFAULT 3,
@@ -444,6 +445,9 @@ export async function ensureDatabaseReady() {
       }
       if (!existingPageCols.has('maxImagesPerReply')) {
         await prisma.$executeRawUnsafe(`ALTER TABLE "Page" ADD COLUMN "maxImagesPerReply" INTEGER NOT NULL DEFAULT 1;`);
+      }
+      if (!existingPageCols.has('autoHumanOnOrder')) {
+        await prisma.$executeRawUnsafe(`ALTER TABLE "Page" ADD COLUMN "autoHumanOnOrder" BOOLEAN NOT NULL DEFAULT 1;`);
       }
 
       // Check User table for missing columns

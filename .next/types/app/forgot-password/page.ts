@@ -1,4 +1,4 @@
-// File: C:\Users\User\.gemini\antigravity-ide\scratch\update-Replyxai\app\forgot-password\page.tsx
+// File: /Users/naimulislam/Documents/ReplyX Pro /app/forgot-password/page.tsx
 import * as entry from '../../../../app/forgot-password/page.js'
 import type { ResolvingMetadata, ResolvingViewport } from 'next/dist/lib/metadata/types/metadata-interface.js'
 

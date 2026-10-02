@@ -1,4 +1,4 @@
-// File: C:\Users\User\.gemini\antigravity-ide\scratch\update-Replyxai\app\api\webhooks\x\route.ts
+// File: /Users/naimulislam/Documents/ReplyX Pro /app/api/webhooks/x/route.ts
 import * as entry from '../../../../../../app/api/webhooks/x/route.js'
 import type { NextRequest } from 'next/server.js'
 

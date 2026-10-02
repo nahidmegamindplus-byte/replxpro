@@ -545,6 +545,11 @@ Your primary goal is to assist customers on Facebook Messenger politely, accurat
 
 ${imageInstructionSection}
 
+[CONVERSATION MEMORY & CONTEXT AWARENESS (পূর্বের কথা মনে রাখার নির্দেশিকা)]
+1. সবসময় গ্রাহকের পূর্ববর্তী বার্তার ইতিহাস ও পূর্ববর্তী আলোচনা পুঙ্খানুপুঙ্খভাবে মনে রাখুন।
+2. গ্রাহক আগে কোনো পণ্যের দাম, ছবি, কালার, ঠিকানা বা অর্ডার সংক্রান্ত কথা বলে থাকলে, নতুন মেসেজ এলে সেই পূর্বের প্রসঙ্গের সাথে সংগতি রেখে স্বাভাবিক মানুষের মতো কথা বলুন। কখনো পূর্বের কথা ভুলে যাওয়ার মতো আচরণ করবেন না।
+3. যদি গ্রাহক আগে ফোন নাম্বার বা ঠিকানা দিয়ে থাকেন বা কোনো নির্দিষ্ট প্রোডাক্ট নিয়ে আগ্রহ প্রকাশ করে থাকেন, তাকে বারবার একই তথ্য জিজ্ঞাসা করবেন না।
+
 [STRICT INVENTORY & PRICING RULES]
 1. Never invent, hallucinate, or guess prices or products not present in the inventory list below.
 2. Keep Messenger replies concise, polite, and well-structured with appropriate emojis.
@@ -640,10 +645,10 @@ If phone or address is missing, politely ask the customer for their mobile numbe
 
       const promptContent: any[] = [];
 
-      // Add conversation history
+      // Add conversation history with deep context memory
       if (conversationHistory.length > 0) {
         const historyText = conversationHistory
-          .slice(-6)
+          .slice(-20)
           .map((m) => `${m.direction === 'INCOMING' ? 'Customer' : 'Assistant'}: ${m.text}`)
           .join('\n');
         promptContent.push(`[Previous Conversation History]:\n${historyText}\n\n[Latest Customer Interaction]:\n`);
@@ -704,7 +709,7 @@ If phone or address is missing, politely ask the customer for their mobile numbe
       const openai = new OpenAI({ apiKey });
       const messagesForOpenAI: any[] = [{ role: 'system', content: systemPrompt }];
 
-      for (const msg of conversationHistory.slice(-6)) {
+      for (const msg of conversationHistory.slice(-20)) {
         messagesForOpenAI.push({
           role: msg.direction === 'INCOMING' ? 'user' : 'assistant',
           content: msg.text,
@@ -759,7 +764,7 @@ If phone or address is missing, politely ask the customer for their mobile numbe
 
       const messagesForGoRouter: any[] = [{ role: 'system', content: systemPrompt }];
 
-      for (const msg of conversationHistory.slice(-6)) {
+      for (const msg of conversationHistory.slice(-20)) {
         messagesForGoRouter.push({
           role: msg.direction === 'INCOMING' ? 'user' : 'assistant',
           content: msg.text,
@@ -806,7 +811,7 @@ If phone or address is missing, politely ask the customer for their mobile numbe
 
       const messagesForDeepseek: any[] = [{ role: 'system', content: systemPrompt }];
 
-      for (const msg of conversationHistory.slice(-6)) {
+      for (const msg of conversationHistory.slice(-20)) {
         messagesForDeepseek.push({
           role: msg.direction === 'INCOMING' ? 'user' : 'assistant',
           content: msg.text,

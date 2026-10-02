@@ -152,6 +152,19 @@ export async function POST(req: NextRequest) {
       },
     });
 
+    if (conversationId) {
+      const shouldAutoHuman = (page as any).autoHumanOnOrder !== undefined ? Boolean((page as any).autoHumanOnOrder) : true;
+      if (shouldAutoHuman) {
+        await prisma.conversation.update({
+          where: { id: conversationId },
+          data: {
+            status: 'HUMAN_MODE',
+            aiEnabled: false,
+          },
+        }).catch(() => {});
+      }
+    }
+
     await logActivity({
       userId: auth.user.id,
       pageId: page.id,
